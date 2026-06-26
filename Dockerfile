@@ -12,6 +12,7 @@ WORKDIR /app
 
 # Install Chrome dependencies + xvfb for headed mode in container
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    redis-server \
     xvfb \
     xauth \
     libnss3 \

@@ -9,11 +9,6 @@ services:
         value: production
       - key: PORT
         value: "3001"
-      - key: REDIS_URL
-        fromService:
-          name: insurance-portal-redis
-          type: redis
-          property: connectionString
       - key: JWT_SECRET
         generateValue: true
       - key: BROWSER_POOL_SIZE
@@ -24,9 +19,3 @@ services:
         sync: false
       - key: PROXY_PASSWORD
         sync: false
-
-  - type: redis
-    name: insurance-portal-redis
-    plan: starter
-    maxmemoryPolicy: allkeys-lru
-    ipAllowList: []
