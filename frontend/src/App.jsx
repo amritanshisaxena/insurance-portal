@@ -91,9 +91,9 @@ export default function App() {
   const ws = useWebSocket(token, dispatch);
   const loadingRef = useRef(false);
 
-  const handleStart = useCallback(async (carrier, email, password) => {
+  const handleStart = useCallback(async (carrier, email, password, rememberSession) => {
     try {
-      const res = await startFlow(carrier, email, password);
+      const res = await startFlow(carrier, email, password, rememberSession);
       dispatch({ type: 'FLOW_STARTED', sessionId: res.sessionId });
     } catch (err) {
       dispatch({ type: 'ERROR', message: err.message });
@@ -153,7 +153,7 @@ export default function App() {
       )}
 
       {state.step === 'idle' && (
-        <CarrierSelect onSubmit={handleStart} disabled={!state.wsConnected} />
+        <CarrierSelect onSubmit={handleStart} disabled={!state.wsConnected || !token} />
       )}
 
       {state.step === 'authenticating' && (

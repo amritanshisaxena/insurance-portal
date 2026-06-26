@@ -12,7 +12,7 @@ const config = require('../config');
 const router = Router();
 
 router.post('/start', authMiddleware, async (req, res) => {
-  const { carrier, email, password } = req.body;
+  const { carrier, email, password, rememberSession } = req.body;
 
   if (!carrier || !email) {
     return res.status(400).json({ error: 'carrier and email are required' });
@@ -47,7 +47,7 @@ router.post('/start', authMiddleware, async (req, res) => {
   const { runCarrierFlow } = require('../ws/handler');
 
   setImmediate(() => {
-    runCarrierFlow(sessionId, carrierEntry, { email, password }, req.auth.sid, timer)
+    runCarrierFlow(sessionId, carrierEntry, { email, password, rememberSession: !!rememberSession }, req.auth.sid, timer)
       .catch((err) => {
         logger.error({ err, sessionId }, 'Carrier flow failed');
       });

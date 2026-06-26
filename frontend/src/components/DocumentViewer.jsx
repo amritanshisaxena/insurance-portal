@@ -13,13 +13,15 @@ function formatBytes(base64Str) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function SummaryBar({ carrier, documentCount, flowStartedAt, mfaSubmittedAt, documentsReadyAt, onReset }) {
+function SummaryBar({ carrier, documentCount, flowStartedAt, mfaSubmittedAt, documentsReadyAt, timing, onReset }) {
   const totalSec = flowStartedAt && documentsReadyAt
     ? ((documentsReadyAt - flowStartedAt) / 1000).toFixed(1)
     : null;
-  const postMfaSec = mfaSubmittedAt && documentsReadyAt
-    ? ((documentsReadyAt - mfaSubmittedAt) / 1000).toFixed(1)
-    : null;
+  const marks = timing?.marks || {};
+  const postMfaSec = marks.mfa_verified && marks.documents_fetched
+    ? (((marks.documents_fetched - marks.mfa_verified) / 1000).toFixed(1))
+    : (mfaSubmittedAt && documentsReadyAt
+      ? ((documentsReadyAt - mfaSubmittedAt) / 1000).toFixed(1) : null);
 
   const stats = [
     { label: 'Carrier', value: carrier || 'Unknown' },
@@ -78,9 +80,12 @@ function SummaryBar({ carrier, documentCount, flowStartedAt, mfaSubmittedAt, doc
 function RunReport({ timing, carrier, documentCount, flowStartedAt, mfaSubmittedAt, documentsReadyAt }) {
   const totalSec = flowStartedAt && documentsReadyAt
     ? ((documentsReadyAt - flowStartedAt) / 1000).toFixed(1) : null;
-  const postMfaSec = mfaSubmittedAt && documentsReadyAt
-    ? ((documentsReadyAt - mfaSubmittedAt) / 1000).toFixed(1) : null;
   const marks = timing?.marks || {};
+  // Post-MFA: from backend mfa_verified to documents_fetched (actual server-side latency)
+  const postMfaSec = marks.mfa_verified && marks.documents_fetched
+    ? (((marks.documents_fetched - marks.mfa_verified) / 1000).toFixed(1))
+    : (mfaSubmittedAt && documentsReadyAt
+      ? ((documentsReadyAt - mfaSubmittedAt) / 1000).toFixed(1) : null);
 
   const items = [
     { label: 'Carrier', value: carrier || 'Unknown' },
@@ -175,6 +180,7 @@ export default function DocumentViewer({ documents, onReset, timing, carrier, fl
         flowStartedAt={flowStartedAt}
         mfaSubmittedAt={mfaSubmittedAt}
         documentsReadyAt={documentsReadyAt}
+        timing={timing}
         onReset={onReset}
       />
 

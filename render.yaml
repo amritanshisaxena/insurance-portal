@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: insurance-portal
+    runtime: docker
+    plan: standard
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: REDIS_URL
+        fromService:
+          name: insurance-portal-redis
+          type: redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: BROWSER_POOL_SIZE
+        value: "1"
+      - key: PROXY_SERVER
+        sync: false
+      - key: PROXY_USERNAME
+        sync: false
+      - key: PROXY_PASSWORD
+        sync: false
+
+  - type: redis
+    name: insurance-portal-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []

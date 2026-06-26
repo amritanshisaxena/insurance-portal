@@ -16,6 +16,12 @@ class LemonadeCarrier extends BaseCarrier {
     await this.page.goto(this.loginUrl, { waitUntil: 'domcontentloaded' });
     await this.delay(1000 + Math.random() * 500);
 
+    // If session cookies are valid, Lemonade redirects straight to the dashboard
+    if (this.page.url().includes('me.lemonade.com')) {
+      logger.info({ sessionId: this.sessionId }, 'Lemonade: Already authenticated via restored session');
+      return false;
+    }
+
     // Dismiss cookie banner if present
     await this.page.evaluate(() => {
       const btns = document.querySelectorAll('button');
@@ -74,19 +80,25 @@ class LemonadeCarrier extends BaseCarrier {
   }
 
   async submitMFA(code) {
+    // Set up API listener BEFORE typing OTP — redirect fires immediately after last digit
+    this._policiesPromise = this.page.waitForResponse(
+      res => res.url().includes('/api/v1/web_dashboard/accounts/home/policies') && res.status() === 200,
+      { timeout: 30000 }
+    ).catch(() => null);
+
     const digits = code.replace(/\s/g, '').split('');
     const inputs = await this.page.$$('input');
 
     if (inputs.length >= 6) {
       await inputs[0].click();
-      await this.delay(200);
+      await this.delay(100);
 
       for (const digit of digits) {
-        await this.page.keyboard.type(digit, { delay: 80 + Math.random() * 50 });
-        await this.delay(100 + Math.random() * 100);
+        await this.page.keyboard.type(digit, { delay: 50 + Math.random() * 30 });
+        await this.delay(60 + Math.random() * 60);
       }
     } else {
-      await this.page.keyboard.type(code, { delay: 80 + Math.random() * 50 });
+      await this.page.keyboard.type(code, { delay: 50 + Math.random() * 30 });
     }
 
     logger.info({ sessionId: this.sessionId }, 'Lemonade: OTP submitted');
@@ -98,34 +110,36 @@ class LemonadeCarrier extends BaseCarrier {
       );
     });
 
-    await this.delay(2000);
     logger.info({ sessionId: this.sessionId }, 'Lemonade: Logged in, on dashboard');
   }
 
   async fetchDocuments() {
     const documents = [];
 
-    // Wait for dashboard to fully render (React async loading)
-    await this.delay(5000);
-
-    // Close cookie banner if present (use evaluate to avoid viewport issues)
     await this.page.evaluate(() => {
       const btns = document.querySelectorAll('button');
       for (const btn of btns) {
         if (/accept all/i.test(btn.textContent)) { btn.click(); return; }
       }
     });
-    await this.delay(500);
 
-    // Intercept the policies API response the dashboard fetches on reload
-    const [policiesResponse] = await Promise.all([
-      this.page.waitForResponse(
-        res => res.url().includes('/api/v1/web_dashboard/accounts/home/policies') && res.status() === 200,
-        { timeout: 15000 }
-      ),
-      this.page.reload({ waitUntil: 'domcontentloaded' }),
-    ]);
-    const policyData = await policiesResponse.json();
+    // Use the response intercepted during MFA redirect if available
+    let policyData;
+    const intercepted = this._policiesPromise ? await this._policiesPromise : null;
+    this.notify({ type: 'status', step: 'mfa_verified', message: 'MFA verified, fetching documents...' });
+    if (intercepted) {
+      policyData = await intercepted.json();
+    } else {
+      // Fallback: reload to trigger the API call
+      const [resp] = await Promise.all([
+        this.page.waitForResponse(
+          res => res.url().includes('/api/v1/web_dashboard/accounts/home/policies') && res.status() === 200,
+          { timeout: 15000 }
+        ),
+        this.page.reload({ waitUntil: 'domcontentloaded' }),
+      ]);
+      policyData = await resp.json();
+    }
 
     const items = policyData?.data?.items || {};
     const policies = Object.values(items).filter(p => p.is_policy);
@@ -138,47 +152,26 @@ class LemonadeCarrier extends BaseCarrier {
     for (const policy of policies) {
       this.notify({ type: 'status', step: 'fetching_documents', message: `Fetching ${policy.humanized_type} policy...` });
 
-      await this.page.goto(`https://me.lemonade.com/policy/${policy.id}`, { waitUntil: 'domcontentloaded' });
-      await this.delay(3000);
-      logger.info({ sessionId: this.sessionId, policyId: policy.id, url: this.page.url() }, 'Lemonade: On policy page');
-
-      await this.page.evaluate(() => {
-        const btns = document.querySelectorAll('button');
-        for (const btn of btns) {
-          if (/accept all/i.test(btn.textContent)) { btn.click(); return; }
-        }
-      });
-      await this.delay(500);
-
-      for (let i = 0; i < 8; i++) {
-        await this.page.evaluate(() => window.scrollBy(0, 400));
-        await this.delay(800);
-      }
-
-      const [download] = await Promise.all([
-        this.page.waitForEvent('download', { timeout: 15000 }),
-        this.page.evaluate(() => {
-          const links = document.querySelectorAll('a');
-          for (const link of links) {
-            if (/download a copy/i.test(link.textContent)) { link.click(); return true; }
-          }
-          return false;
-        }),
-      ]);
-
       const policyLabel = policy.humanized_type || policy.coverage_type || policy.id;
       const suggestedName = `Lemonade ${policyLabel} Policy - ${policy.id}.pdf`;
-      const filePath = await download.path();
 
-      if (filePath) {
-        const fs = require('fs');
-        const buffer = fs.readFileSync(filePath);
-        documents.push({
-          name: suggestedName,
-          buffer,
-          mimeType: 'application/pdf',
-        });
+      const downloadUrl = policy.form_url;
+      if (downloadUrl) {
+        logger.info({ sessionId: this.sessionId, policyId: policy.id }, 'Lemonade: Downloading via form_url (skipping page nav)');
+        const response = await this.page.context().request.get(downloadUrl);
+        const buffer = Buffer.from(await response.body());
+        documents.push({ name: suggestedName, buffer, mimeType: 'application/pdf' });
         logger.info({ sessionId: this.sessionId, name: suggestedName, size: buffer.length }, 'Lemonade: Document downloaded');
+      } else {
+        await this.page.goto(`https://me.lemonade.com/policy/${policy.id}`, { waitUntil: 'domcontentloaded' });
+        const downloadLink = await this.page.waitForSelector('a:has-text("download a copy")', { timeout: 10000 }).catch(() => null);
+        const href = downloadLink ? await downloadLink.getAttribute('href') : null;
+        if (href) {
+          const response = await this.page.context().request.get(href);
+          const buffer = Buffer.from(await response.body());
+          documents.push({ name: suggestedName, buffer, mimeType: 'application/pdf' });
+          logger.info({ sessionId: this.sessionId, name: suggestedName, size: buffer.length }, 'Lemonade: Document downloaded (fallback)');
+        }
       }
     }
 

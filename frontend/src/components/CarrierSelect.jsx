@@ -9,6 +9,7 @@ export default function CarrierSelect({ onSubmit, disabled }) {
   const [carrier, setCarrier] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberSession, setRememberSession] = useState(false);
 
   const selected = CARRIERS.find((c) => c.id === carrier);
   const needsPassword = selected?.requiresPassword ?? false;
@@ -17,7 +18,7 @@ export default function CarrierSelect({ onSubmit, disabled }) {
     e.preventDefault();
     if (!carrier || !email) return;
     if (needsPassword && !password) return;
-    onSubmit(carrier, email, password || undefined);
+    onSubmit(carrier, email, password || undefined, rememberSession);
   };
 
   const cardStyle = (id) => ({
@@ -94,6 +95,32 @@ export default function CarrierSelect({ onSubmit, disabled }) {
             </div>
           )}
 
+          <label style={{
+            display: 'flex', alignItems: 'flex-start', gap: 10,
+            marginBottom: 18, padding: '12px 14px',
+            fontSize: 13, color: 'var(--text-secondary)',
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}>
+            <input
+              type="checkbox"
+              checked={rememberSession}
+              onChange={(e) => setRememberSession(e.target.checked)}
+              style={{ marginTop: 2, accentColor: 'var(--accent)' }}
+            />
+            <div>
+              <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: 3 }}>
+                Remember this session
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                Saves encrypted browser cookies (not your credentials) so future logins may skip MFA. Expires after 24 hours.
+              </div>
+            </div>
+          </label>
+
           <button
             type="submit"
             disabled={disabled || !email || (needsPassword && !password)}
@@ -125,7 +152,7 @@ export default function CarrierSelect({ onSubmit, disabled }) {
             borderRadius: 'var(--radius-sm)',
           }}>
             <span style={{ fontSize: 13, flexShrink: 0 }}>&#x1f512;</span>
-            Credentials are used only for this session and never stored.
+            Credentials are used only during this session and never stored. Session reuse saves only encrypted browser cookies — your email and password are never persisted.
           </div>
         </div>
       )}

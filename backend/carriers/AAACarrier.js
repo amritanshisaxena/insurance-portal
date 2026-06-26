@@ -1,6 +1,5 @@
 const BaseCarrier = require('./BaseCarrier');
 const logger = require('../utils/logger');
-const fs = require('fs');
 
 class AAACarrier extends BaseCarrier {
   constructor(page, sessionId, notify) {
@@ -15,6 +14,16 @@ class AAACarrier extends BaseCarrier {
     // Step 1: Navigate to AAA login
     await this.page.goto('https://mwg.aaa.com/my-account', { waitUntil: 'domcontentloaded' });
     await this.delay(2000 + Math.random() * 1000);
+
+    // If session cookies are valid, AAA may redirect past login
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('mypolicy') || currentUrl.includes('csaa-insurance') || currentUrl.includes('mwg.aaa.com/my-account')) {
+      const hasLoginForm = await this.page.$('input#username');
+      if (!hasLoginForm) {
+        logger.info({ sessionId: this.sessionId }, 'AAA: Already authenticated via restored session');
+        return false;
+      }
+    }
 
     // Step 2: Email input (Auth0 Universal Login at auth.mwg.aaa.com)
     const emailInput = await this.page.waitForSelector('input#username', { timeout: 15000 });
@@ -64,76 +73,87 @@ class AAACarrier extends BaseCarrier {
 
   async execute(credentials, waitForMFACode) {
     this.notify({ type: 'status', step: 'logging_in', message: 'Logging into AAA...' });
-    await this.login(credentials);
+    const needsMFA = await this.login(credentials);
 
-    this.notify({ type: 'status', step: 'logging_in', message: 'Navigating to insurance portal...' });
-
-    // Navigate via header mega dropdown: Insurance → Manage Insurance → Manage Policy
-    // Step 1: Hover "Insurance" in header to open dropdown
-    const insuranceNav = await this.page.waitForSelector(
-      'header a:has-text("Insurance"), nav a:has-text("Insurance")',
-      { timeout: 10000 }
-    );
-    await insuranceNav.hover();
-    await this.delay(1500);
-
-    // Step 2: Hover "Manage Insurance" in the left column
-    // Use locator to find it within the visible dropdown
-    const manageInsLocator = this.page.locator('text=Manage Insurance').first();
-    await manageInsLocator.hover({ timeout: 5000 });
-    await this.delay(1500);
-
-    // Step 3: Click "Manage Policy" in the right column
-    // Use noWaitAfter since it may open a new tab or trigger a slow redirect
-    const [newPage] = await Promise.all([
-      this.page.context().waitForEvent('page', { timeout: 10000 }).catch(() => null),
-      this.page.locator('text=Manage Policy').first().click({ noWaitAfter: true, timeout: 5000 }),
-    ]);
-
-    if (newPage) {
-      await newPage.waitForLoadState('domcontentloaded');
-      this.page = newPage;
-      logger.info({ sessionId: this.sessionId }, 'AAA: Manage Policy opened in new tab');
+    if (needsMFA === false) {
+      // Session restored — skip login, nav, and MFA, go straight to documents
+      this.notify({ type: 'status', step: 'session_restored', message: 'Session restored — skipping login' });
     } else {
-      await this.delay(3000);
-    }
+      this.notify({ type: 'status', step: 'logging_in', message: 'Navigating to insurance portal...' });
 
-    logger.info({ sessionId: this.sessionId, url: this.page.url() }, 'AAA: After Manage Policy click');
-
-    // "Manage Policy & Billing" opens a second Auth0 login for the CSAA MyPolicy app
-    // Handle popup (new tab) or same-tab navigation
-    const popup = await this.page.waitForEvent('popup', { timeout: 10000 }).catch(() => null);
-    if (popup) {
-      await popup.waitForLoadState('domcontentloaded');
-      this.page = popup;
-    }
-
-    await this.delay(2000);
-    let afterNavUrl = this.page.url();
-    logger.info({ sessionId: this.sessionId, url: afterNavUrl }, 'AAA: After Manage Policy click');
-
-    // Second Auth0 login: "Manage Policy" triggers a new Auth0 flow for CSAA MyPolicy app
-    if (afterNavUrl.includes('auth.mwg.aaa.com') || afterNavUrl.includes('/u/login')) {
-      logger.info({ sessionId: this.sessionId }, 'AAA: Second Auth0 login for MyPolicy portal');
-      await this.handleSecondLogin(credentials);
-      afterNavUrl = this.page.url();
-    }
-
-    if (afterNavUrl.includes('okta.com')) {
-      await this.handleOktaMFA(waitForMFACode);
-    } else if (afterNavUrl.includes('mypolicy') || afterNavUrl.includes('csaa-insurance')) {
-      logger.info({ sessionId: this.sessionId }, 'AAA: Already past MFA, on MyPolicy');
-    } else {
-      await this.page.waitForURL(
-        (url) => {
-          const href = url.toString();
-          return href.includes('okta.com') || href.includes('mypolicy') || href.includes('csaa-insurance');
-        },
-        { timeout: 20000 }
+      // Navigate via header mega dropdown: Insurance → Manage Insurance → Manage Policy
+      const insuranceNav = await this.page.waitForSelector(
+        'header a:has-text("Insurance"), nav a:has-text("Insurance")',
+        { timeout: 10000 }
       );
+      await insuranceNav.hover();
+      await this.delay(500);
 
-      if (this.page.url().includes('okta.com')) {
+      const manageInsLocator = this.page.locator('text=Manage Insurance').first();
+      await manageInsLocator.hover({ timeout: 5000 });
+      await this.delay(500);
+
+      const [newPage] = await Promise.all([
+        this.page.context().waitForEvent('page', { timeout: 10000 }).catch(() => null),
+        this.page.locator('text=Manage Policy').first().click({ noWaitAfter: true, timeout: 5000 }),
+      ]);
+
+      if (newPage) {
+        await newPage.waitForLoadState('domcontentloaded');
+        this.page = newPage;
+        logger.info({ sessionId: this.sessionId }, 'AAA: Manage Policy opened in new tab');
+      } else {
+        await this.delay(2000);
+      }
+
+      await this.delay(500);
+      let afterNavUrl = this.page.url();
+      logger.info({ sessionId: this.sessionId, url: afterNavUrl }, 'AAA: After Manage Policy navigation');
+
+      if (afterNavUrl.includes('/u/login') || afterNavUrl.includes('auth.')) {
+        logger.info({ sessionId: this.sessionId }, 'AAA: Auth0 login required');
+        try {
+          await this.handleSecondLogin(credentials);
+          afterNavUrl = this.page.url();
+        } catch (e) {
+          // Auth0 closes the popup after login — find the right page
+          logger.info({ sessionId: this.sessionId, error: e.message }, 'AAA: Auth0 popup closed, scanning pages');
+          await this.delay(3000);
+          const pages = this.page.context().pages();
+          const urls = pages.map(p => p.url());
+          logger.info({ sessionId: this.sessionId, urls }, 'AAA: All open pages after Auth0');
+
+          const oktaPage = pages.find(p => p.url().includes('okta.com'));
+          const policyPage = pages.find(p => p.url().includes('mypolicy') || p.url().includes('csaa-insurance'));
+          if (oktaPage) {
+            this.page = oktaPage;
+          } else if (policyPage) {
+            this.page = policyPage;
+          } else {
+            // Check if dashboard page changed
+            this.page = pages[0];
+          }
+          afterNavUrl = this.page.url();
+          logger.info({ sessionId: this.sessionId, url: afterNavUrl }, 'AAA: Recovered page');
+        }
+      }
+
+      if (afterNavUrl.includes('okta.com')) {
         await this.handleOktaMFA(waitForMFACode);
+      } else if (afterNavUrl.includes('mypolicy') || afterNavUrl.includes('csaa-insurance')) {
+        logger.info({ sessionId: this.sessionId }, 'AAA: Already past MFA, on MyPolicy');
+      } else {
+        // Wait on whatever page we have for a redirect
+        await this.page.waitForURL(
+          (url) => {
+            const href = url.toString();
+            return href.includes('okta.com') || href.includes('mypolicy') || href.includes('csaa-insurance');
+          },
+          { timeout: 20000 }
+        );
+        if (this.page.url().includes('okta.com')) {
+          await this.handleOktaMFA(waitForMFACode);
+        }
       }
     }
 
@@ -188,7 +208,6 @@ class AAACarrier extends BaseCarrier {
     logger.info({ sessionId: this.sessionId }, 'AAA: On Okta MFA page');
 
     // Click "Send me the code" button
-    await this.delay(1000);
     const sendCodeBtn = await this.page.waitForSelector(
       'input[value="Send me the code"], a:has-text("Send me the code"), button:has-text("Send me the code")',
       { timeout: 10000 }
@@ -220,103 +239,159 @@ class AAACarrier extends BaseCarrier {
 
     await this.delay(500);
 
+    // Set up API interceptor BEFORE verify click — dashboard calls policies API on load
+    this._policiesPromise = this.page.waitForResponse(
+      res => res.url().includes('/api-customers/v1/customers/policies') && res.status() === 200,
+      { timeout: 30000 }
+    ).catch(() => null);
+
     // Click verify/submit button
     await this.page.click('input[type="submit"], button[type="submit"], input[value="Verify"], button:has-text("Verify")');
 
-    // Wait for redirect to MyPolicy
-    await this.page.waitForURL(
-      (url) => url.toString().includes('mypolicy') || url.toString().includes('csaa-insurance'),
-      { timeout: 20000 }
-    );
-
-    await this.delay(2000);
-    logger.info({ sessionId: this.sessionId }, 'AAA: Okta MFA passed, on MyPolicy dashboard');
+    logger.info({ sessionId: this.sessionId }, 'AAA: MFA verify clicked, waiting for policies API');
   }
 
   async fetchDocuments() {
     const documents = [];
-    const currentUrl = this.page.url();
 
-    // Navigate to policies page to discover all policy numbers
-    this.notify({ type: 'status', step: 'fetching_documents', message: 'Navigating to policies...' });
+    this.notify({ type: 'status', step: 'fetching_documents', message: 'Fetching policy data...' });
 
-    if (!currentUrl.includes('/policies')) {
-      const viewPolicies = await this.page.$('a:has-text("View policies"), button:has-text("View policies")');
-      if (viewPolicies) {
-        await viewPolicies.click();
-      } else {
-        await this.page.goto('https://mypolicy.csaa-insurance.aaa.com/policies', { waitUntil: 'domcontentloaded' });
+    // Get policies from intercepted API response (set up in handleOktaMFA)
+    let policies = [];
+    if (this._policiesPromise) {
+      const resp = await this._policiesPromise;
+      // Mark MFA verified — Okta redirect complete, MyPolicy loaded
+      this.notify({ type: 'status', step: 'mfa_verified', message: 'MFA verified, fetching documents...' });
+      if (resp) {
+        try {
+          const data = await resp.json();
+          policies = (data.policies || []).map(p => {
+            const year = (p.effectiveDate || '').split('/').pop();
+            return { number: p.policyNumber, urlId: `${p.policyNumber}${year}`, type: p.policyType };
+          });
+        } catch {}
       }
     }
-    await this.delay(5000);
 
-    // Find ALL policy numbers on the page (retry until rendered)
-    let policyNumbers = [];
-    for (let i = 0; i < 6; i++) {
-      policyNumbers = await this.page.evaluate(() => {
-        const matches = [...document.body.textContent.matchAll(/[A-Z]{2,6}\d{5,}/g)];
-        return [...new Set(matches.map(m => m[0]))];
-      });
-      if (policyNumbers.length > 0) break;
-      await this.delay(2000);
+    // Fallback: navigate to /policies and scrape from page text
+    if (policies.length === 0) {
+      logger.info({ sessionId: this.sessionId }, 'AAA: API intercept missed, falling back to page scrape');
+      await this.page.goto('https://www.mypolicy.csaa-insurance.aaa.com/policies', { waitUntil: 'domcontentloaded' });
+      for (let i = 0; i < 12; i++) {
+        const found = await this.page.evaluate(() => {
+          const matches = [...document.body.textContent.matchAll(/[A-Z]{2,6}\d{5,}/g)];
+          return [...new Set(matches.map(m => m[0]))];
+        });
+        if (found.length > 0) {
+          policies = found.map(n => ({ number: n, urlId: n, type: 'Unknown' }));
+          break;
+        }
+        await this.delay(600);
+      }
     }
 
-    logger.info({ sessionId: this.sessionId, policyNumbers }, 'AAA: Found policy numbers');
+    logger.info({ sessionId: this.sessionId, policies }, 'AAA: Found policies');
 
-    if (policyNumbers.length === 0) {
-      throw new Error('Could not find any policy numbers on AAA policies page');
+    if (policies.length === 0) {
+      throw new Error('Could not find any policies on AAA account');
     }
 
-    // For each policy, navigate to its document library and download matching docs
-    for (const policyNumber of policyNumbers) {
-      this.notify({ type: 'status', step: 'fetching_documents', message: `Opening document library for ${policyNumber}...` });
+    for (const policy of policies) {
+      this.notify({ type: 'status', step: 'fetching_documents', message: `Opening document library for ${policy.number}...` });
+
+      // Intercept catalog API request headers + response
+      let catalogHeaders = null;
+      const reqHandler = (req) => {
+        if (req.url().includes('/api-documents/v1/documents/retrieve') && !req.url().includes('/retrieve/')) {
+          catalogHeaders = req.headers();
+        }
+      };
+      this.page.on('request', reqHandler);
+
+      const catalogPromise = this.page.waitForResponse(
+        res => {
+          const u = res.url();
+          return u.includes('/api-documents/v1/documents/retrieve') && !u.includes('/retrieve/') && res.status() === 200;
+        },
+        { timeout: 15000 }
+      ).catch(() => null);
 
       await this.page.goto(
-        `https://mypolicy.csaa-insurance.aaa.com/documents/${policyNumber}`,
+        `https://www.mypolicy.csaa-insurance.aaa.com/documents/${policy.urlId}`,
         { waitUntil: 'domcontentloaded' }
       );
-      await this.delay(5000);
-      logger.info({ sessionId: this.sessionId, policyNumber, url: this.page.url() }, 'AAA: On document library');
 
-      for (let i = 0; i < 4; i++) {
-        await this.page.evaluate(() => window.scrollBy(0, 400));
-        await this.delay(1000);
-      }
+      const catalogResp = await catalogPromise;
+      this.page.removeListener('request', reqHandler);
 
-      let docLinks = await this.page.evaluate(() => {
-        return Array.from(document.querySelectorAll('a'))
-          .filter(a => {
-            const t = a.textContent.toLowerCase();
-            return t.includes('member') && t.includes('policy');
-          })
-          .map(a => a.textContent.trim());
-      });
+      if (catalogResp && catalogHeaders) {
+        const catalog = await catalogResp.json();
+        const currentDocs = catalog.currentDocuments || [];
 
-      if (docLinks.length === 0) {
-        logger.warn({ sessionId: this.sessionId, policyNumber }, 'AAA: No "member"+"policy" docs, trying broader match');
-        docLinks = await this.page.evaluate(() => {
-          return Array.from(document.querySelectorAll('a'))
-            .filter(a => {
-              const t = a.textContent.toLowerCase().trim();
-              return t.includes('policy') && t.length > 5 && t.length < 80
-                && !t.includes('edit') && !t.includes('quote') && !t.includes('link your') && !t.includes('view');
-            })
-            .map(a => a.textContent.trim());
+        const policyDocs = currentDocs.filter(d => {
+          const name = (d.documentDescription || '').toLowerCase();
+          return name.includes('policy') && !name.includes('privacy') && !name.includes('enrollment');
         });
-      }
+        const toFetch = policyDocs.length > 0 ? policyDocs : [currentDocs[0]];
 
-      logger.info({ sessionId: this.sessionId, policyNumber, docLinks }, 'AAA: Document links found');
+        logger.info({ sessionId: this.sessionId, found: toFetch.map(d => d.documentDescription) }, 'AAA: Policy docs found in catalog');
 
-      for (const docName of docLinks) {
-        this.notify({ type: 'status', step: 'fetching_documents', message: `Downloading ${docName}...` });
-        const pdfBuffer = await this.downloadDocument(docName);
-        if (pdfBuffer) {
-          documents.push({
-            name: `${docName}.pdf`,
-            buffer: pdfBuffer,
-            mimeType: 'application/pdf',
-          });
-          logger.info({ sessionId: this.sessionId, name: docName, size: pdfBuffer.length }, 'AAA: Document downloaded');
+        const authHeaders = {
+          'authorization': catalogHeaders['authorization'],
+          'x-api-key': catalogHeaders['x-api-key'],
+          'customer-key': catalogHeaders['customer-key'],
+        };
+
+        for (const doc of toFetch) {
+          const docName = doc.documentDescription;
+          this.notify({ type: 'status', step: 'fetching_documents', message: `Downloading ${docName}...` });
+
+          const pdfUrl = `https://www.mypolicy.csaa-insurance.aaa.com/api-documents/v1/documents/retrieve/${doc.documentIdentifier}`;
+          const resp = await this.page.context().request.get(pdfUrl, { headers: authHeaders });
+          if (resp.ok()) {
+            let buffer = Buffer.from(await resp.body());
+            // API returns base64-encoded PDF — decode it
+            const head = buffer.slice(0, 5).toString('utf8');
+            if (head === 'JVBER') {
+              buffer = Buffer.from(buffer.toString('utf8'), 'base64');
+            }
+            documents.push({ name: `${docName}.pdf`, buffer, mimeType: 'application/pdf' });
+            logger.info({ sessionId: this.sessionId, name: docName, size: buffer.length }, 'AAA: Document downloaded via API');
+          }
+        }
+      } else {
+        // Fallback: wait for blob links
+        logger.info({ sessionId: this.sessionId }, 'AAA: Catalog intercept missed, falling back to blob links');
+        await this.page.waitForFunction(() => {
+          return Array.from(document.querySelectorAll('a[href^="blob:"]'))
+            .some(a => /\bpolicy\b/i.test(a.textContent) && !/privacy/i.test(a.textContent));
+        }, { timeout: 20000 }).catch(() => null);
+
+        const blobLinks = await this.page.evaluate(() => {
+          return Array.from(document.querySelectorAll('a[href^="blob:"]'))
+            .map(a => ({ text: a.textContent.trim(), href: a.href }));
+        });
+
+        const selected = blobLinks.filter(l => {
+          const t = l.text.toLowerCase();
+          return t.includes('policy') && !t.includes('privacy');
+        });
+        if (selected.length === 0 && blobLinks.length > 0) selected.push(blobLinks[0]);
+
+        for (const doc of selected) {
+          const b64 = await this.page.evaluate(async (blobUrl) => {
+            const response = await fetch(blobUrl);
+            const blob = await response.blob();
+            return new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result.split(',')[1]);
+              reader.readAsDataURL(blob);
+            });
+          }, doc.href);
+
+          const buffer = Buffer.from(b64, 'base64');
+          documents.push({ name: `${doc.text}.pdf`, buffer, mimeType: 'application/pdf' });
+          logger.info({ sessionId: this.sessionId, name: doc.text, size: buffer.length }, 'AAA: Document downloaded (blob fallback)');
         }
       }
     }
@@ -328,54 +403,6 @@ class AAACarrier extends BaseCarrier {
     return documents;
   }
 
-  async downloadDocument(docName) {
-    // Set up listeners before clicking — documents open as blob URLs in new tabs
-    const [newTab] = await Promise.all([
-      this.page.context().waitForEvent('page', { timeout: 15000 }).catch(() => null),
-      this.page.locator(`a:has-text("${docName}")`).first().click({ noWaitAfter: true }),
-    ]);
-
-    // Case 1: Document opened in a new tab (blob URL)
-    if (newTab) {
-      await newTab.waitForLoadState('load', { timeout: 15000 });
-      await this.delay(2000);
-      const url = newTab.url();
-      logger.info({ sessionId: this.sessionId, url }, 'AAA: Document opened in new tab');
-
-      try {
-        const bufferArray = await newTab.evaluate(async () => {
-          const response = await fetch(window.location.href);
-          const blob = await response.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-          return Array.from(new Uint8Array(arrayBuffer));
-        });
-        await newTab.close();
-        return Buffer.from(bufferArray);
-      } catch (err) {
-        logger.warn({ err }, 'AAA: Failed to fetch blob content, trying PDF capture');
-        // Try getting the PDF via the page's content
-        try {
-          const pdfBytes = await newTab.pdf();
-          await newTab.close();
-          return pdfBytes;
-        } catch {
-          await newTab.close().catch(() => {});
-        }
-      }
-    }
-
-    // Case 2: PDF response intercepted on the same page
-    // Wait briefly for any download event
-    const download = await this.page.waitForEvent('download', { timeout: 5000 }).catch(() => null);
-    if (download) {
-      const filePath = await download.path();
-      if (filePath) {
-        return fs.readFileSync(filePath);
-      }
-    }
-
-    return null;
-  }
 }
 
 module.exports = AAACarrier;

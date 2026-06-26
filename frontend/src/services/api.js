@@ -26,10 +26,10 @@ export async function getCarriers() {
   return request('/auth/carriers');
 }
 
-export async function startFlow(carrier, email, password) {
+export async function startFlow(carrier, email, password, rememberSession = false) {
   return request('/carrier/start', {
     method: 'POST',
-    body: JSON.stringify({ carrier, email, password }),
+    body: JSON.stringify({ carrier, email, password, rememberSession }),
   });
 }
 

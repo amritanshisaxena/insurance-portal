@@ -11,15 +11,19 @@ class BaseCarrier {
 
   async execute(credentials, waitForMFACode) {
     this.notify({ type: 'status', step: 'logging_in', message: 'Logging in...' });
-    await this.login(credentials);
+    const needsMFA = await this.login(credentials);
 
-    this.notify({ type: 'mfa_required', mfaType: this.mfaType || 'code', message: this.mfaMessage || 'Enter verification code' });
-    this.notify({ type: 'status', step: 'awaiting_mfa', message: 'Waiting for verification code...' });
+    if (needsMFA !== false) {
+      this.notify({ type: 'mfa_required', mfaType: this.mfaType || 'code', message: this.mfaMessage || 'Enter verification code' });
+      this.notify({ type: 'status', step: 'awaiting_mfa', message: 'Waiting for verification code...' });
 
-    const code = await waitForMFACode(this.sessionId);
+      const code = await waitForMFACode(this.sessionId);
 
-    this.notify({ type: 'status', step: 'submitting_mfa', message: 'Submitting verification code...' });
-    await this.submitMFA(code);
+      this.notify({ type: 'status', step: 'submitting_mfa', message: 'Submitting verification code...' });
+      await this.submitMFA(code);
+    } else {
+      this.notify({ type: 'status', step: 'session_restored', message: 'Session restored — skipping login' });
+    }
 
     this.notify({ type: 'status', step: 'fetching_documents', message: 'Fetching documents...' });
     const documents = await this.fetchDocuments();
