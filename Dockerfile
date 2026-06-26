@@ -44,10 +44,14 @@ COPY backend/ ./backend/
 # Copy built frontend
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
 ENV NODE_ENV=production
 ENV PORT=3001
+ENV DISPLAY=:99
 
 EXPOSE 3001
 
-# Use xvfb-run for headed Chrome in container (stealth benefit)
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1366x768x24", "node", "backend/server.js"]
+CMD ["./docker-entrypoint.sh"]
