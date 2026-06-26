@@ -13,6 +13,7 @@ WORKDIR /app
 # Install Chrome dependencies + xvfb for headed mode in container
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
+    xauth \
     libnss3 \
     libatk-bridge2.0-0 \
     libdrm2 \
