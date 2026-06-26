@@ -36,8 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Install Patchright Chrome
-RUN npx patchright install chrome
+# Install Patchright browsers (chrome + chromium for path compatibility)
+RUN npx patchright install chromium && npx patchright install chrome
 
 # Copy backend source
 COPY backend/ ./backend/
