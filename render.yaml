@@ -27,6 +27,6 @@ services:
 
   - type: redis
     name: insurance-portal-redis
-    plan: free
+    plan: starter
     maxmemoryPolicy: allkeys-lru
     ipAllowList: []
