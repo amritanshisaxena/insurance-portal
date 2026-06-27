@@ -105,17 +105,26 @@ MFA handoff uses a Promise-based pending map — the carrier automation awaits u
 
 Target: **under 10 seconds** from MFA submission to document on screen.
 
-**Optimization approach:**
-- Replaced all fixed `delay()` calls with `waitForSelector` / `waitForResponse` — the bot proceeds as soon as content renders, not after an arbitrary timeout
-- Policy discovery via API response interception (`page.waitForResponse`) instead of DOM scraping — faster and more reliable
-- Single-page PDF rendering in the viewer — renders one page at a time instead of all 50+ pages, so first paint is instant
-- Scroll-to-target instead of full-page scroll loops — `scrollIntoViewIfNeeded()` to jump directly to download links
-
 **Measured latencies** (post-MFA to documents on screen):
 - Lemonade: ~8-12s (1 policy, 52-page PDF)
 - AAA: ~10-15s (depends on number of policies, ~5-8s per policy)
 
 The majority of post-MFA time is network I/O (page navigations, PDF downloads) rather than artificial delays.
+
+**What we tried to reduce latency:**
+
+| Attempt | Result | Why |
+|---------|--------|-----|
+| API response interception during MFA redirect | **Worked** | Set up `page.waitForResponse()` for the policies API *before* clicking MFA verify / typing OTP. Captures the response as the page loads post-MFA instead of making a separate request. Saves ~2-3s on both carriers. |
+| Removed `waitForURL` after MFA verify click (AAA) | **Worked** | Previously waited for URL to change after Okta verify, adding ~3-5s. Removed it — the policies API interceptor already detects when the page has loaded. |
+| Fixed catalog URL matching — `endsWith` → `includes` (AAA) | **Worked** | AAA's document catalog API URL sometimes has query params. `endsWith('/retrieve')` missed these, causing a fallback to slower DOM-based document scraping. `includes()` catches all variants. |
+| Direct `form_url` download (Lemonade) | **Worked** | Lemonade's policies API response includes a `form_url` field with a direct link to the PDF. Downloading from this URL directly skips navigating to each policy page entirely. Saves ~3-5s per policy. |
+| Replaced full-page scroll loops with `scrollIntoViewIfNeeded()` | **Worked** | Original approach scrolled the entire page 4-8 times with 800ms-1s delays to discover download links. Replaced with targeted scroll to the specific element. Saved ~4-8s per carrier. |
+| `waitForSelector`/`waitForResponse` instead of fixed `delay()` calls | **Worked** | Bot proceeds as soon as content renders instead of waiting an arbitrary timeout. Replaced ~15s of cumulative `delay()` calls across both carrier flows. |
+| Fixed timing measurement (`mfaMarked` once-only flag) | **Worked** | `mfa_verified` timer mark was being overwritten by subsequent status updates, making post-MFA time appear artificially short (~2s instead of real ~8s). Added a once-only flag. |
+| Single-page PDF rendering in viewer | **Worked** | Renders one page at a time with navigation controls instead of all 50+ pages. First paint is instant instead of waiting for the entire document to render. |
+| Parallel document download | **Didn't implement** | Could download multiple policy PDFs simultaneously but carriers may rate-limit parallel requests. Sequential is more reliable. |
+| Pre-fetching documents during MFA wait | **Not possible** | Can't fetch documents before MFA completes — the carrier doesn't authenticate until MFA is verified. |
 
 ## Session Reuse
 
@@ -154,8 +163,8 @@ Storage state keys are hashed (SHA-256) so email addresses aren't stored in Redi
 - **Residential proxy**: Env vars are wired up (`PROXY_SERVER`, `PROXY_USERNAME`, `PROXY_PASSWORD`) but not required. Both carriers accept datacenter IPs when cookies and fingerprints are clean.
 
 ### Carrier-specific observations
-- **Lemonade**: Light anti-bot. Accepts automation with just Patchright + headed mode. No Cloudflare, no reCAPTCHA. The main challenge is passwordless OTP flow, not detection.
-- **AAA (CSAA/Okta)**: Uses Okta for MFA which has moderate bot detection. `navigator.webdriver` patch is critical — Okta checks it. Headed mode required. The Okta email verification flow is straightforward once past detection.
+- **Lemonade**: Light anti-bot. No Cloudflare, no reCAPTCHA. Accepts automation with just Patchright + headed mode. The real challenge was the passwordless OTP flow (no password field, 6 separate digit inputs, SPA navigation after OTP). Anti-bot was not the blocker here — UX automation was.
+- **AAA (CSAA/Okta)**: Moderate anti-bot via Okta. `navigator.webdriver` patch is critical — Okta actively checks it and blocks if detected. Headed mode required (headless fails silently — Okta serves a blank page). The real challenge was navigation: direct URL access to the policy page triggers a different auth chain than in-app navigation (see Challenges section). The mega dropdown approach was discovered after trying 5 other methods.
 
 ## Security & Privacy
 
@@ -208,6 +217,44 @@ Storage state keys are hashed (SHA-256) so email addresses aren't stored in Redi
 ├── render.yaml                # Render Blueprint for cloud deploy
 └── .env.example
 ```
+
+## Challenges & What We Tried
+
+### Lemonade
+
+| Challenge | What we tried | Outcome |
+|-----------|--------------|---------|
+| **Passwordless login** | Lemonade has no password — just email + OTP. Had to discover and implement the email-only flow, which is unusual among insurance carriers. | Worked. The flow enters email → clicks LOG IN → selects "Send passcode by email" → user enters 6-digit OTP. |
+| **OTP input is 6 separate single-digit fields** | Tried `page.type()` into a single input — didn't work because each digit has its own `<input>`. | Fixed: detect if there are 6+ inputs, click the first one, then type each digit sequentially with `keyboard.type()`. Auto-submits after last digit. |
+| **"Send passcode by email" link not clickable** | First tried `page.click('a:has-text("Send passcode by email")')` — failed because the text is inside a `<span>` wrapped in an anchor with non-standard structure. | Fixed: try `a`, `span`, and `button` selectors, then fall back to `page.evaluate()` that walks all DOM elements matching the text with flexible whitespace. |
+| **Cookie consent banner blocking interactions** | Lemonade shows an "Accept All" cookie banner that overlays the page. Bot clicks failed because the banner intercepted events. | Fixed: dismiss the cookie banner via `page.evaluate()` before interacting with login elements. Run this on every page load. |
+| **Policy discovery — DOM scraping vs API** | Initially navigated to each policy page and looked for "download a copy" links by scrolling the page. Slow (~5s per policy) and fragile if Lemonade changes their UI. | Replaced with API response interception: `page.waitForResponse()` captures the `/policies` API call that Lemonade's SPA makes on dashboard load. Gets all policy data (IDs, types, `form_url`) in one shot. |
+| **Document download — page navigation vs direct URL** | First approach: navigate to `me.lemonade.com/policy/{id}`, scroll to find "download a copy" link, click it. ~5s per policy. | Replaced: the policies API includes `form_url` with a direct link to the PDF. Download via `context.request.get(form_url)` — no page navigation needed. Falls back to page navigation if `form_url` is missing. |
+| **SPA navigation after OTP** | After OTP submission, Lemonade does a client-side redirect. `waitForURL` sometimes timed out because the URL change happens before the page is ready. | Fixed: `waitForURL('**/me.lemonade.com**')` with fallback to `waitForFunction(() => !window.location.href.includes('/login'))`. |
+
+### AAA Insurance
+
+| Challenge | What we tried | Outcome |
+|-----------|--------------|---------|
+| **Getting to the policy page after login** | After Auth0 login, needed to reach `mwg.aaa.com/mypolicy`. Tried navigating directly to the URL. | **Failed** — direct navigation to `mwg.aaa.com/mypolicy` redirects to `auth.northeast.aaa.com/u/login` instead of Okta MFA. This is a server-side redirect, not a client-side one. |
+| **Geo cookies to prevent northeast redirect** | Set cookies: `mwg_main_dc_region=california`, `locdata` with California GPS coordinates, `geo_region=california-ca\|CA`. | **Failed** — the redirect is server-side based on the SSO session, not cookies. The cookies are for the CDN/content layer, not the auth layer. |
+| **Opening policy URL in a new tab** | Tried `context.newPage()` + `goto('mwg.aaa.com/mypolicy')` thinking a new tab might carry the auth session differently. | **Failed** — same northeast redirect. The URL itself triggers a different auth chain than the in-app navigation. |
+| **Extracting the Manage Policy link href** | Extracted the `href` from the "Manage Policy" link in the mega dropdown, hoping it contained SSO parameters. | **Failed** — the href is just `https://mwg.aaa.com/mypolicy` with no SSO params. But clicking it from the dashboard works because the browser follows the full redirect chain with proper Referer headers and session cookies in context. |
+| **Direct Okta verification URL** | Tried navigating directly to `csaainsurance.okta.com/signin/verify/okta/email`. | **Failed** — Okta requires the full SSO flow context; direct URL doesn't have the necessary state tokens. |
+| **Mega dropdown hover navigation** | Hover "Insurance" nav → hover "Manage Insurance" → click "Manage Policy". This opens a new tab that follows the correct SSO redirect chain to Okta MFA. | **Worked** — the key insight is that the navigation must happen organically from the AAA dashboard. The click triggers the correct SSO redirect chain because the browser sends the proper Referer and session context. |
+| **Auth0 popup closes after login** | `handleSecondLogin()` for the Auth0 popup threw `TargetClosedError` because Auth0 closes the popup window after successful authentication. | Fixed: wrapped in try/catch, on `TargetClosedError` scan all open browser pages for Okta or MyPolicy URLs. |
+| **Northeast Auth0 has single-page login** | The northeast Auth0 shows email + password on the same page, not the multi-step flow (email → Continue → password) that the main AAA auth uses. | Moot — once we switched to mega dropdown navigation, we no longer hit the northeast Auth0 at all. |
+| **Document catalog API URL matching** | `res.url().endsWith('/api-documents/v1/documents/retrieve')` missed responses that had query parameters appended. | Fixed: changed to `res.url().includes('/api-documents/v1/documents/retrieve')` with exclusion for `/retrieve/{id}` (individual doc endpoint). |
+
+### Deployment
+
+| Challenge | What we tried | Outcome |
+|-----------|--------------|---------|
+| **Railway free tier** | Deployed to Railway ($5 free credit). Two builds failed: missing `xauth` package, then `xvfb-run` hanging. | Fixed both, but then hit "Agent usage limit reached" — free tier can't increase the limit, requires Hobby plan ($5/month). Switched to Render. |
+| **`xvfb-run` hangs in containers** | Used `xvfb-run node backend/server.js` as the Docker CMD. | **Failed** — `xvfb-run` blocks in Railway's container environment. Replaced with `docker-entrypoint.sh` that starts `Xvfb :99` as a background process and then `exec node`. |
+| **CRLF line endings in shell script** | Git on Windows converted `docker-entrypoint.sh` to CRLF. Linux containers can't execute `#!/bin/sh\r`. | Fixed: added `.gitattributes` forcing LF for `.sh` files, plus `sed -i 's/\r$//'` in Dockerfile as a safety net. |
+| **Patchright browser path mismatch** | `npx patchright install chrome` installs Chrome, but `chromium.launch()` at runtime looks for Chromium at a different path. | Fixed: install both `chromium` and `chrome` in the Dockerfile. |
+| **Render pricing ($35/month for web + Redis)** | Render Blueprint created a separate Redis service ($10/month) plus Standard web service ($25/month). | Fixed: bundled `redis-server` inside the Docker container. Redis runs as a background process in `docker-entrypoint.sh`. Total cost: $25/month (prorated by the second). |
 
 ## Tradeoffs & Design Decisions
 
